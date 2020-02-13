@@ -118,61 +118,26 @@ classdef VSTree < handle
                 nodeNo = startingNodes(i);
                 % If parent node is not T or S node
                 if ((obj.NodeParents(nodeNo) == 0) || ...
-                        (obj.NodeDepths(2, nodeNo) == VSTenum.Vnode))                     
+                        (obj.NodeDepths(2, nodeNo) == VSTenum.Vnode))
                     % Do Octree partitioning
-                    
-                    % Prevent dividing beyond the maximum depth
-                    if obj.NodeDepths(1, nodeNo)+1 >= obj.Properties.maxDepth(1)
-                        continue;
-                    end
-                    
-                    % Prevent dividing beyond a minimum size
-                    objBounds = obj.NodeBoundaries(nodeNo,:);
-                    nodeEdgeSize = diff(objBounds([1:3;4:6]));
-                    minEdgeSize = min(nodeEdgeSize);                    
-                    if minEdgeSize < obj.Properties.minSize
-                        continue;
-                    end
-                    
-                    % Check whether it contains more points than more
-                    % points than node Capacity
                     oldCount = obj.NodeCount;
-                    if nnz(obj.PointNodes==nodeNo) > obj.Properties.nodeCapacity
-                        obj.oct_divideNode(nodeNo);
-                        obj.divide(oldCount+1:obj.NodeCount);
-                        continue;
-                    end                    
-                elseif (obj.NodeDepths(2, nodeNo) ~= VSTenum.Empty)
+                    obj.oct_divideNode(nodeNo);
+                    obj.divide(oldCount+1:obj.NodeCount);                    
+                elseif (obj.NodeDepths(2, nodeNo) ~= VSTenum.Empty) && ...
+                        (obj.NodeDepths(2, nodeNo) ~= VSTenum.SnodeL)
                     % Do Quadtree partitioning
                     % Prevent dividing beyond the maximum depth
-                    % Note. T-node has 0 value over node depths
-                    if obj.NodeDepths(1, nodeNo)+1 >= obj.Properties.maxDepth(2)
-                        continue;
-                    end
+                    % Note. T-node has 0 value over node depths                    
                     
                     % Check whether it passes Error Criterion
                     if obj.Properties.errorFun(obj, nodeNo)
                         obj.NodeDepths(2, nodeNo) = VSTenum.SnodeL;
                         continue;
                     end
-                    
-                    % Prevent dividing beyond a minimum size
-                    objBounds = obj.NodeBoundaries(nodeNo,:);
-                    nodeEdgeSize = diff(objBounds([1:2;4:5]));
-                    minEdgeSize = min(nodeEdgeSize);
-                    if minEdgeSize < obj.Properties.minSize
-                        continue;
-                    end
-                    
-                    % Check whether it contains more points than more
-                    % points than node Capacity
-                    oldCount = obj.NodeCount;
-                    if nnz(obj.PointNodes==nodeNo) > obj.Properties.nodeCapacity
-                        obj.quad_divideNode(nodeNo);                        
-                        obj.divide(oldCount+1:obj.NodeCount);
-                    else
-                        obj.NodeDepths(2, nodeNo) = VSTenum.SnodeL;
-                    end
+
+                    oldCount = obj.NodeCount;                    
+                    obj.quad_divideNode(nodeNo);
+                    obj.divide(oldCount+1:obj.NodeCount);                    
                 else
                     % Do nothing
                 end
@@ -220,20 +185,20 @@ classdef VSTree < handle
             for cidx = 1:8
                 cellNo = newNodeInds(cidx);
                 cellPoints = obj.Points(obj.PointNodes == cellNo,:);
-                if isempty(cellPoints)
-                    obj.NodeDepths(1, cellNo) = obj.NodeDepths(1, nodeNo)+1;
+                obj.NodeDepths(1, cellNo) = obj.NodeDepths(1, nodeNo)+1;
+                if isempty(cellPoints)                    
                     obj.NodeDepths(2, cellNo) = double(VSTenum.Empty);                
                     continue;
                 end
                 cellNormals = obj.Properties.ptsnormal(obj.PointNodes == cellNo, :);                
                 objNodeFrame = computeLocalFrame(obj, cellNo);                
                 obj.NodeFrames(cellNo,:) = objNodeFrame;
+                obj.NodeDepths(2, cellNo) = double(VSTenum.Vnode);     
                 % Kappa test, delta_a, delta_d are set to 0, 1/6. (can be
-                % modified w.r.t. input data)
+                % modified w.r.t. input data)                
                 flag = obj.Properties.kappaFun(obj, cellPoints, cellNormals, obj.NodeFrames(cellNo,:));
-                if flag
-                    obj.NodeDepths(1, cellNo) = obj.NodeDepths(1, nodeNo)+1;
-                    obj.NodeDepths(2, cellNo) = double(VSTenum.Tnode);                
+                if flag || checkNodeValidity(obj, cellNo)                    
+                    obj.NodeDepths(2, cellNo) = double(VSTenum.Tnode);
                     % Project 3D points onto the local frame
                     rotMat = reshape(objNodeFrame(1:9), 3, 3);
                     objNodePointsProj = (cellPoints - ...
@@ -241,10 +206,7 @@ classdef VSTree < handle
                     objNodePointsProj(:,3) = 0; %Orthographic projection
                     projMin = min(objNodePointsProj, [], 1);
                     projMax = max(objNodePointsProj, [], 1);
-                    obj.NodeBoundaries(cellNo, :) = [projMin, projMax];
-                else
-                    obj.NodeDepths(1, cellNo) = obj.NodeDepths(1, nodeNo)+1; 
-                    obj.NodeDepths(2, cellNo) = double(VSTenum.Vnode);                     
+                    obj.NodeBoundaries(cellNo, :) = [projMin, projMax];                                    
                 end
             end
         end
@@ -262,8 +224,6 @@ classdef VSTree < handle
             objNodePointsProj(:,3) = 0; %Orthographic projection
             
             % Compute plane boundary 
-%             projMin = min(objNodePointsProj, [], 1);
-%             projMax = max(objNodePointsProj, [], 1);
             projMin = obj.NodeBoundaries(nodeNo,1:3);
             projMax = obj.NodeBoundaries(nodeNo,4:6);
             projDiv = mean([projMin; projMax], 1);
@@ -271,18 +231,6 @@ classdef VSTree < handle
             % Build the new boundaries of our 4 subdivisions
             % newBounds = [TL, BL, TR, BR]
             % Bottom/Top, Left/Right
-%             minMidMax = [projMin projDiv projMax];
-            % For debuging
-%             newBounds = minMidMax([...
-%                 1 2 3 4 5 6;
-%                 1 5 3 4 8 6;
-%                 4 2 3 7 5 6;
-%                 4 5 3 7 8 6]);
-%             tmp = newBounds(1,:);
-%             pts = cat(1, tmp([1,2,3; 1,5,3; 4,5,6;, 4,2,6; 1,2,3]));
-%             hold on; plot3(pts(:,1), pts(:,2), pts(:,3));
-%             minMidMaxRot = reshape((rotMat*[projMin; projDiv; projMax]' + ...
-%                 repmat(objNodeFrame(10:12)', 1, 3)), 1, []);
             minMidMax = [projMin projDiv projMax];
             newBounds = minMidMax([...
                 1 2 3 4 5 6;
@@ -297,19 +245,20 @@ classdef VSTree < handle
             [~, nodeAssignment] = max(all(bsxfun(@eq, gtMask, nodeMap),2),[],3);
             
             newNodeInds = obj.NodeCount+1:obj.NodeCount+4;
-            % Project-back subdivided boundaries into 3D space
-%             minMidMaxRot = rotMat*reshape(minMidMax, 3, []);
-%             newBounds = minMidMaxRot([...
-%                 1 2 3 4 5 6;                
-%                 1 2 6 4 5 9;
-%                 4 5 3 7 8 6;
-%                 4 5 6 7 8 9]) + repmat(objNodeFrame(10:12), 4, 2);
             obj.NodeBoundaries(newNodeInds,:) = newBounds;
             obj.PointNodes(nodePtMask) = newNodeInds(nodeAssignment);
             obj.NodeParents(newNodeInds) = nodeNo;
             obj.NodeCount = obj.NodeCount+4;
             obj.NodeDepths(1, newNodeInds) = obj.NodeDepths(1, nodeNo)+1;
-            obj.NodeDepths(2, newNodeInds) = double(VSTenum.Snode);
+            for cidx = 1:4
+                cellNo = newNodeInds(cidx);
+                obj.NodeDepths(2, cellNo) = double(VSTenum.Snode);
+                if isempty(obj.Points(obj.PointNodes==cellNo,:))
+                    obj.NodeDepths(2, cellNo) = double(VSTenum.Empty);
+                elseif checkNodeValidity(obj, cellNo)
+                    obj.NodeDepths(2, cellNo) = double(VSTenum.SnodeL);                
+                end
+            end
             obj.NodeFrames(newNodeInds,:) = repmat(objNodeFrame, length(newNodeInds), 1);
         end
         
@@ -348,6 +297,22 @@ classdef VSTree < handle
             else
                 flag = false;
             end            
+        end
+        
+        function flag = checkNodeValidity(obj, nodeNo)
+            objBounds = obj.NodeBoundaries(nodeNo,:);            
+            if obj.NodeDepths(2, nodeNo) == VSTenum.Vnode                
+                % In the case of V-node
+                minEdgeSize = min(diff(objBounds([1:3;4:6])));
+                flag = (obj.NodeDepths(1, nodeNo)+1 >= obj.Properties.maxDepth(1)) || ...
+                    minEdgeSize < obj.Properties.minSize || ...
+                    nnz(obj.PointNodes==nodeNo) <= obj.Properties.nodeCapacity;
+            else
+                minEdgeSize = min(diff(objBounds([1:2;4:5])));
+                flag = (obj.NodeDepths(1, nodeNo)+1 >= obj.Properties.maxDepth(2)) || ...
+                    minEdgeSize < obj.Properties.minSize || ...
+                    nnz(obj.PointNodes==nodeNo) <= obj.Properties.nodeCapacity;
+            end
         end
         
         function Frame = computeLocalFrame(obj, nodeNo)
