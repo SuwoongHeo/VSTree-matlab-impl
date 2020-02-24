@@ -70,7 +70,7 @@ classdef VSTree < handle
             IP.addParameter('nodeCapacity', ceil(numPts)/10);
             IP.addParameter('maxDepth', [inf, inf]);
             IP.addParameter('minSize', 1000*eps);
-            IP.addParameter('errorFun', @Geometric);
+            IP.addParameter('errorFun', @Geometric3D);
             IP.addParameter('kappaFun', @HfieldIndi);
             IP.addParameter('delta_a', 0);
             IP.addParameter('delta_d', 1/6);
@@ -128,12 +128,6 @@ classdef VSTree < handle
                     % Do Quadtree partitioning
                     % Prevent dividing beyond the maximum depth
                     % Note. T-node has 0 value over node depths                    
-                    
-                    % Check whether it passes Error Criterion
-                    if obj.Properties.errorFun(obj, nodeNo)
-                        obj.NodeDepths(2, nodeNo) = VSTenum.SnodeL;
-                        continue;
-                    end
 
                     oldCount = obj.NodeCount;                    
                     obj.quad_divideNode(nodeNo);
@@ -250,22 +244,51 @@ classdef VSTree < handle
             obj.NodeParents(newNodeInds) = nodeNo;
             obj.NodeCount = obj.NodeCount+4;
             obj.NodeDepths(1, newNodeInds) = obj.NodeDepths(1, nodeNo)+1;
+            obj.NodeFrames(newNodeInds,:) = repmat(objNodeFrame, length(newNodeInds), 1);
             for cidx = 1:4
                 cellNo = newNodeInds(cidx);
                 obj.NodeDepths(2, cellNo) = double(VSTenum.Snode);
                 if isempty(obj.Points(obj.PointNodes==cellNo,:))
                     obj.NodeDepths(2, cellNo) = double(VSTenum.Empty);
-                elseif checkNodeValidity(obj, cellNo)
+                elseif checkNodeValidity(obj, cellNo) || obj.Properties.errorFun(obj, cellNo)
                     obj.NodeDepths(2, cellNo) = double(VSTenum.SnodeL);                
                 end
-            end
-            obj.NodeFrames(newNodeInds,:) = repmat(objNodeFrame, length(newNodeInds), 1);
+            end            
         end
         
-        function [flag, error] = Geometric(obj, nodeNo)
+        function [flag, error] = Geometric2D(obj, nodeNo)
+            % 2D Geometric error criterion for Surface node
             nodePtMask = obj.PointNodes==nodeNo;
-            objNodePoints = obj.Points(nodePtMask,:);            
+            objNodePoints = obj.Points(nodePtMask,:);
             objNodeFrame = obj.NodeFrames(nodeNo,:);
+            
+            % Project 3D points onto the local frame
+            rotMat = reshape(objNodeFrame(1:9), 3, 3);
+            objNodePointsProj = (objNodePoints - ...
+                repmat(objNodeFrame(10:12), size(objNodePoints,1), 1))*rotMat;
+            objNodePointsProj(:,3) = 0; %Orthographic projection
+            
+            [mu, pcs, ~] = nestedPCA(obj, objNodePointsProj);
+            
+            a = pcs(1,2);
+            b = pcs(2,2);
+            c = -[a,b] * mu(1:2)';            
+            Q = [a^2 a*b a*c;...
+                a*b b^2 b*c;...
+                a*c b*c c^2];
+            
+            pij = [objNodePointsProj(:,1:2), ones(size(objNodePointsProj,1),1)];
+            
+            error = sum(sum((pij*Q).*pij,2),1);
+            flag = error < obj.Properties.errorTh;
+        end
+        
+        function [flag, error] = Geometric3D(obj, nodeNo)
+            % It should be computed on 2D line distance (Not 3D)            
+            nodePtMask = obj.PointNodes==nodeNo;
+            objNodePoints = obj.Points(nodePtMask,:);
+%             objNodeFrame = obj.NodeFrames(nodeNo,:);
+            objNodeFrame = computeLocalFrame(obj, nodeNo);
             
             a = objNodeFrame(7);
             b = objNodeFrame(8);
@@ -340,7 +363,26 @@ classdef VSTree < handle
             [evec, eval] = eig(PHI);
             [~, sidx] = sort(diag(eval), 'descend');
             pcs = evec(:, sidx);
-            lambda = diag(eval(:,sidx)); lambda = lambda(sidx);            
+            lambda = diag(eval); lambda = lambda(sidx);            
+        end
+        
+        function PointTNodes = getTnodeChilds(obj)
+            leafNodes = unique(obj.PointNodes);            
+            PointTNodes = zeros(length(obj.PointNodes),1);
+            for i=1:length(leafNodes)
+                currentNode = leafNodes(i);
+                while 1
+                    NodeParent = obj.NodeParents(currentNode);
+                    if obj.NodeDepths(2, NodeParent) == double(VSTenum.Tnode)
+                        PointTNodes(obj.PointNodes==leafNodes(i),1) = NodeParent;                        
+                        break;
+                    else
+                        currentNode = NodeParent;
+                    end
+                end
+            end
+            
+            
         end
         
         function h = plot(obj, mode, varargin)
@@ -359,7 +401,7 @@ classdef VSTree < handle
             %       Visualize surface only with leaf node - 10(3)
             
             VnodeSel = mod(mode,3);
-            SnodeSel = ceil(mode/3);
+            SnodeSel = floor(mode/3);
             
             if VnodeSel == 2, selNode = (obj.NodeDepths(2,:) == VSTenum.Vnode) | (obj.NodeDepths(2,:) == VSTenum.Tnode);
             elseif VnodeSel == 1, selNode = obj.NodeDepths(2,:) == VSTenum.Tnode;
@@ -375,7 +417,12 @@ classdef VSTree < handle
             h = zeros(sum(selNode),1);
             for i=1:obj.NodeCount
                 if selNode(i)
-                    nodeMinMax = obj.NodeBoundaries(i,:);
+                    if obj.NodeDepths(2,i) == double(VSTenum.Tnode)
+                        nodeMinMax = obj.NodeBoundaries(obj.NodeParents(i),:);
+                    else
+                        nodeMinMax = obj.NodeBoundaries(i,:);
+                    end
+                    
                     if (obj.NodeDepths(2,i) == double(VSTenum.Snode)) || ...
                             (obj.NodeDepths(2,i) == double(VSTenum.SnodeL))
                         rotMat = reshape(obj.NodeFrames(i, 1:9), 3, 3);
@@ -384,8 +431,6 @@ classdef VSTree < handle
                         pts3d = rotMat*pts2d' + repmat(center', 1, 4);
                         pts = cat(1, pts3d([...
                             1,2,3; 4,5,6; 10,11,12; 7,8,9; 1,2,3]));
-%                         pts = cat(1, nodeMinMax([...
-%                             1,2,3; 1,2,6; 4,5,6; 4,5,3; 1,2,3]));
                     else
                         pts = cat(1, nodeMinMax([...
                             1 2 3; 4 2 3; 4 5 3; 1 5 3; 1 2 3;...
